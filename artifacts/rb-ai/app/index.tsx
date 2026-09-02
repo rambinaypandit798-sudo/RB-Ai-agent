@@ -11,6 +11,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { Feather } from '@expo/vector-icons';
@@ -21,6 +22,16 @@ const colors = colorTokens.light;
 
 type ModelName = 'Gemini' | 'Grok' | 'OpenRouter';
 type TabName = 'Home' | 'Chat' | 'Voice' | 'Memory' | 'Settings';
+type ActivityStatus = 'Completed' | 'Blocked' | 'Local only';
+type ActivityEvent = {
+  id: string;
+  timestamp: string;
+  action: string;
+  source: string;
+  model: ModelName;
+  status: ActivityStatus;
+  result: string;
+};
 
 const models: ModelName[] = ['Gemini', 'Grok', 'OpenRouter'];
 const tabs: { name: TabName; icon: keyof typeof Feather.glyphMap }[] = [
@@ -332,35 +343,45 @@ function HomeView({
   );
 }
 
-function UtilityView({ active, onAction }: { active: Exclude<TabName, 'Home'>; onAction: (action: string) => void }) {
+function UtilityView({
+  active,
+  model,
+  activity,
+  onAction,
+}: {
+  active: Exclude<TabName, 'Home'>;
+  model: ModelName;
+  activity: ActivityEvent[];
+  onAction: (action: string) => void;
+}) {
   const content = {
     Chat: {
       eyebrow: 'CONVERSATION LAYER',
       title: 'Ready when you are.',
-      body: 'Ask anything, brainstorm freely, or pick up where you left off.',
+      body: 'The conversation surface is ready. Connect an approved model provider to send requests.',
       icon: 'message-circle' as keyof typeof Feather.glyphMap,
-      action: 'Start a conversation',
+      action: 'Check model connection',
     },
     Voice: {
       eyebrow: 'VOICE INTERFACE',
-      title: 'Speak naturally.',
-      body: 'RB is tuned in and ready to turn your thoughts into momentum.',
+      title: 'Say “Hey RB”.',
+      body: 'RB stays in low-power wake-word mode until you explicitly start a voice session.',
       icon: 'mic' as keyof typeof Feather.glyphMap,
-      action: 'Activate voice',
+      action: 'Review voice access',
     },
     Memory: {
       eyebrow: 'PRIVATE MEMORY',
-      title: 'Your context, preserved.',
-      body: 'RB remembers what matters so every interaction feels more like you.',
+      title: 'Your activity, visible.',
+      body: 'This local activity history shows what RB actually did on this device. Cloud memory is not connected.',
       icon: 'archive' as keyof typeof Feather.glyphMap,
-      action: 'Explore memory',
+      action: 'Review activity',
     },
     Settings: {
       eyebrow: 'SYSTEM PREFERENCES',
       title: 'Make RB yours.',
-      body: 'Tune the way your personal AI looks, sounds, and responds.',
+      body: 'Tune the way your personal AI looks, sounds, and responds. External accounts remain disconnected.',
       icon: 'sliders' as keyof typeof Feather.glyphMap,
-      action: 'Review preferences',
+      action: 'Review local preferences',
     },
   }[active];
 
@@ -384,8 +405,31 @@ function UtilityView({ active, onAction }: { active: Exclude<TabName, 'Home'>; o
       <View style={styles.utilityRule} />
       <View style={styles.utilityMeta}>
         <View style={styles.onlineDot} />
-        <Text style={styles.utilityMetaText}>RB.ai core is online</Text>
+        <Text style={styles.utilityMetaText}>
+          {active === 'Memory' ? `${activity.length} local event${activity.length === 1 ? '' : 's'}` : 'RB.ai core is online'}
+        </Text>
       </View>
+      {active === 'Memory' ? (
+        <View style={styles.activityList}>
+          {activity.length === 0 ? (
+            <View style={styles.activityEmpty}>
+              <Feather name="inbox" size={17} color={colors.mutedForeground} />
+              <Text style={styles.activityEmptyText}>No activity recorded yet.</Text>
+            </View>
+          ) : (
+            activity.slice(0, 4).map((event) => (
+              <View key={event.id} style={styles.activityRow}>
+                <View style={[styles.activityStatus, event.status === 'Blocked' && styles.activityStatusBlocked]} />
+                <View style={styles.activityCopy}>
+                  <Text style={styles.activityAction}>{event.action}</Text>
+                  <Text style={styles.activityResult}>{event.result}</Text>
+                </View>
+                <Text style={styles.activityTime}>{event.timestamp}</Text>
+              </View>
+            ))
+          )}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -395,13 +439,30 @@ export default function HomeScreen() {
   const [activeTab, setActiveTab] = useState<TabName>('Home');
   const [model, setModel] = useState<ModelName>('Gemini');
   const [modelOpen, setModelOpen] = useState(false);
-  const [listening, setListening] = useState(true);
+  const [listening, setListening] = useState(false);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [feedback, setFeedback] = useState('');
   const feedbackOpacity = useRef(new Animated.Value(0)).current;
   const webTopInset = Platform.OS === 'web' ? Math.max(insets.top, 67) : insets.top;
   const webBottomInset = Platform.OS === 'web' ? 34 : insets.bottom;
 
   const topPadding = useMemo(() => webTopInset + 9, [webTopInset]);
+
+  useEffect(() => {
+    AsyncStorage.getItem('rb-ai.activity')
+      .then((saved) => {
+        if (!saved) return;
+        const parsed = JSON.parse(saved) as ActivityEvent[];
+        setActivity(Array.isArray(parsed) ? parsed : []);
+      })
+      .catch(() => {
+        setActivity([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.setItem('rb-ai.activity', JSON.stringify(activity.slice(0, 20))).catch(() => undefined);
+  }, [activity]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -412,6 +473,19 @@ export default function HomeScreen() {
       Animated.timing(feedbackOpacity, { toValue: 0, duration: 260, useNativeDriver: true }),
     ]).start();
   }, [feedback, feedbackOpacity]);
+
+  const logActivity = (action: string, status: ActivityStatus, result: string) => {
+    const event: ActivityEvent = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      action,
+      source: 'RB.ai app',
+      model,
+      status,
+      result,
+    };
+    setActivity((current) => [event, ...current].slice(0, 20));
+  };
 
   const showFeedback = (message: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -429,12 +503,19 @@ export default function HomeScreen() {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setModel(nextModel);
     setModelOpen(false);
+    logActivity('Model changed', 'Completed', `${nextModel} selected locally`);
     showFeedback(`${nextModel} selected`);
   };
 
   const toggleOrb = () => {
-    setListening((current) => !current);
-    showFeedback(listening ? 'Listening paused' : 'Listening resumed');
+    const nextListening = !listening;
+    setListening(nextListening);
+    logActivity(
+      nextListening ? 'Voice session started' : 'Voice session ended',
+      'Local only',
+      nextListening ? 'Explicit tap activated the local voice surface' : 'Returned to wake-word mode',
+    );
+    showFeedback(nextListening ? 'Voice surface active' : 'Wake-word mode');
   };
 
   return (
@@ -475,7 +556,7 @@ export default function HomeScreen() {
               onAction={showFeedback}
             />
           ) : (
-            <UtilityView active={activeTab} onAction={showFeedback} />
+            <UtilityView active={activeTab} model={model} activity={activity} onAction={showFeedback} />
           )}
         </ScrollView>
       </View>
@@ -1087,6 +1168,66 @@ const styles = StyleSheet.create({
     color: colors.mutedForeground,
     fontFamily: 'Inter_400Regular',
     fontSize: 11,
+  },
+  activityList: {
+    width: '100%',
+    marginTop: 23,
+    gap: 10,
+  },
+  activityEmpty: {
+    minHeight: 54,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.accentSoft,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    paddingHorizontal: 13,
+  },
+  activityEmptyText: {
+    color: colors.mutedForeground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 11,
+  },
+  activityRow: {
+    minHeight: 57,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.accentSoft,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    gap: 9,
+  },
+  activityStatus: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.primary,
+  },
+  activityStatusBlocked: {
+    backgroundColor: colors.destructive,
+  },
+  activityCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  activityAction: {
+    color: colors.foreground,
+    fontFamily: 'Inter_500Medium',
+    fontSize: 11,
+  },
+  activityResult: {
+    color: colors.mutedForeground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 10,
+  },
+  activityTime: {
+    color: colors.mutedForeground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 9,
   },
   feedback: {
     position: 'absolute',
