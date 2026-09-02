@@ -9,6 +9,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -16,6 +17,7 @@ import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import colorTokens from '@/constants/colors';
 
 const colors = colorTokens.light;
@@ -31,6 +33,12 @@ type ActivityEvent = {
   model: ModelName;
   status: ActivityStatus;
   result: string;
+};
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: string;
 };
 
 const models: ModelName[] = ['Gemini', 'Grok', 'OpenRouter'];
@@ -343,17 +351,111 @@ function HomeView({
   );
 }
 
+function ConversationView({
+  model,
+  messages,
+  draft,
+  onDraftChange,
+  onSend,
+}: {
+  model: ModelName;
+  messages: ChatMessage[];
+  draft: string;
+  onDraftChange: (text: string) => void;
+  onSend: () => void;
+}) {
+  return (
+    <KeyboardAvoidingView style={styles.conversationView} behavior="padding" keyboardVerticalOffset={0}>
+      <View style={styles.conversationHeader}>
+        <View>
+          <Text style={styles.kicker}>CONVERSATION LAYER</Text>
+          <Text style={styles.conversationTitle}>Stay in context.</Text>
+        </View>
+        <View style={styles.modelChip}>
+          <View style={styles.modelIndicator} />
+          <Text style={styles.modelChipText}>{model}</Text>
+        </View>
+      </View>
+      <View style={styles.conversationRule} />
+      <View style={styles.messageList}>
+        {messages.map((message) => (
+          <View key={message.id} style={[styles.messageRow, message.role === 'user' && styles.messageRowUser]}>
+            <View style={[styles.messageBubble, message.role === 'user' && styles.messageBubbleUser]}>
+              <Text style={[styles.messageRole, message.role === 'user' && styles.messageRoleUser]}>
+                {message.role === 'user' ? 'YOU' : 'RB.ai'}
+              </Text>
+              <Text style={[styles.messageText, message.role === 'user' && styles.messageTextUser]}>
+                {message.text}
+              </Text>
+              <Text style={styles.messageTime}>{message.timestamp}</Text>
+            </View>
+          </View>
+        ))}
+      </View>
+      <View style={styles.composer}>
+        <TextInput
+          testID="chat-input"
+          accessibilityLabel="Message RB.ai"
+          value={draft}
+          onChangeText={onDraftChange}
+          placeholder="Say something to RB.ai"
+          placeholderTextColor={colors.mutedForeground}
+          multiline
+          returnKeyType="send"
+          onSubmitEditing={onSend}
+          style={styles.composerInput}
+        />
+        <Pressable
+          testID="send-message"
+          accessibilityRole="button"
+          accessibilityLabel="Send message"
+          disabled={!draft.trim()}
+          onPress={onSend}
+          style={({ pressed }) => [
+            styles.sendButton,
+            !draft.trim() && styles.sendButtonDisabled,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Feather name="arrow-up" size={17} color={colors.primaryForeground} />
+        </Pressable>
+      </View>
+      <Text style={styles.conversationFootnote}>Local mode • no provider request will be sent</Text>
+    </KeyboardAvoidingView>
+  );
+}
+
 function UtilityView({
   active,
   model,
   activity,
   onAction,
+  messages,
+  draft,
+  onDraftChange,
+  onSend,
 }: {
   active: Exclude<TabName, 'Home'>;
   model: ModelName;
   activity: ActivityEvent[];
   onAction: (action: string) => void;
+  messages: ChatMessage[];
+  draft: string;
+  onDraftChange: (text: string) => void;
+  onSend: () => void;
 }) {
+  if (active === 'Chat') {
+    return (
+      <ConversationView
+        model={model}
+        messages={messages}
+        draft={draft}
+        onDraftChange={onDraftChange}
+        onSend={onSend}
+      />
+    );
+  }
+
   const content = {
     Chat: {
       eyebrow: 'CONVERSATION LAYER',
@@ -441,6 +543,15 @@ export default function HomeScreen() {
   const [modelOpen, setModelOpen] = useState(false);
   const [listening, setListening] = useState(false);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: 'local-mode',
+      role: 'assistant',
+      text: 'RB.ai is online in local mode. Connect an approved model provider to receive verified answers.',
+      timestamp: 'NOW',
+    },
+  ]);
+  const [draft, setDraft] = useState('');
   const [feedback, setFeedback] = useState('');
   const feedbackOpacity = useRef(new Animated.Value(0)).current;
   const webTopInset = Platform.OS === 'web' ? Math.max(insets.top, 67) : insets.top;
@@ -461,8 +572,22 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
+    AsyncStorage.getItem('rb-ai.messages')
+      .then((saved) => {
+        if (!saved) return;
+        const parsed = JSON.parse(saved) as ChatMessage[];
+        if (Array.isArray(parsed) && parsed.length > 0) setMessages(parsed);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     AsyncStorage.setItem('rb-ai.activity', JSON.stringify(activity.slice(0, 20))).catch(() => undefined);
   }, [activity]);
+
+  useEffect(() => {
+    AsyncStorage.setItem('rb-ai.messages', JSON.stringify(messages.slice(-12))).catch(() => undefined);
+  }, [messages]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -518,6 +643,54 @@ export default function HomeScreen() {
     showFeedback(nextListening ? 'Voice surface active' : 'Wake-word mode');
   };
 
+  const sendMessage = () => {
+    const text = draft.trim();
+    if (!text) return;
+
+    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const userMessage: ChatMessage = {
+      id: `${Date.now()}-user`,
+      role: 'user',
+      text,
+      timestamp: now,
+    };
+    const previousUserMessage = [...messages].reverse().find((message) => message.role === 'user');
+    const normalized = text.toLowerCase().replace(/[.!?]+$/, '');
+    const isFollowUp = normalized === 'do it';
+    const hasConsequentialVerb = /\b(delete|remove|send|pay|purchase|buy|open|launch|share|post|change)\b/i.test(text);
+    let reply = '';
+    let status: ActivityStatus = 'Local only';
+
+    if (isFollowUp && !previousUserMessage) {
+      reply = 'I need the request you want me to continue before I can act. What should I do?';
+      status = 'Blocked';
+    } else if (isFollowUp && previousUserMessage) {
+      const context = previousUserMessage.text.length > 52
+        ? `${previousUserMessage.text.slice(0, 52)}…`
+        : previousUserMessage.text;
+      reply = hasConsequentialVerb || /\b(delete|remove|send|pay|purchase|buy|open|launch|share|post|change)\b/i.test(previousUserMessage.text)
+        ? `I’m carrying forward “${context}”. That could have external consequences, so I need the exact action and your confirmation before proceeding.`
+        : `I’m carrying forward “${context}”. No approved model or tool is connected, so I can’t safely reason or execute it in local mode.`;
+      status = hasConsequentialVerb ? 'Blocked' : 'Local only';
+    } else if (hasConsequentialVerb) {
+      reply = 'I understand the request. Because it could affect an external app or account, RB.ai would require confirmation before acting. No tool is connected in local mode.';
+      status = 'Blocked';
+    } else {
+      reply = `${model} is selected in the interface, but no provider is connected. I received your message and won’t claim a verified answer without one.`;
+    }
+
+    const assistantMessage: ChatMessage = {
+      id: `${Date.now()}-assistant`,
+      role: 'assistant',
+      text: reply,
+      timestamp: now,
+    };
+    setMessages((current) => [...current, userMessage, assistantMessage].slice(-12));
+    setDraft('');
+    logActivity('Conversation message', status, status === 'Blocked' ? 'Confirmation or clarification required' : 'Context preserved locally');
+    showFeedback(status === 'Blocked' ? 'Confirmation required' : 'Message received');
+  };
+
   return (
     <View style={styles.screen}>
       <StatusBar barStyle="light-content" />
@@ -556,7 +729,16 @@ export default function HomeScreen() {
               onAction={showFeedback}
             />
           ) : (
-            <UtilityView active={activeTab} model={model} activity={activity} onAction={showFeedback} />
+            <UtilityView
+              active={activeTab}
+              model={model}
+              activity={activity}
+              onAction={showFeedback}
+              messages={messages}
+              draft={draft}
+              onDraftChange={setDraft}
+              onSend={sendMessage}
+            />
           )}
         </ScrollView>
       </View>
@@ -1097,6 +1279,136 @@ const styles = StyleSheet.create({
   navLabelActive: {
     color: colors.primary,
     fontFamily: 'Inter_500Medium',
+  },
+  conversationView: {
+    flex: 1,
+    minHeight: 620,
+    paddingBottom: 75,
+  },
+  conversationHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  conversationTitle: {
+    color: colors.foreground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 28,
+    letterSpacing: -0.8,
+  },
+  modelChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 9,
+    height: 27,
+    borderRadius: 14,
+    backgroundColor: colors.accentSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modelChipText: {
+    color: colors.whiteSoft,
+    fontFamily: 'Inter_500Medium',
+    fontSize: 9,
+    letterSpacing: 0.6,
+  },
+  conversationRule: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginBottom: 16,
+  },
+  messageList: {
+    flex: 1,
+    gap: 12,
+  },
+  messageRow: {
+    alignItems: 'flex-start',
+  },
+  messageRowUser: {
+    alignItems: 'flex-end',
+  },
+  messageBubble: {
+    maxWidth: '89%',
+    borderRadius: 17,
+    borderTopLeftRadius: 5,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.glass,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  messageBubbleUser: {
+    borderTopLeftRadius: 17,
+    borderTopRightRadius: 5,
+    backgroundColor: colors.accent,
+    borderColor: colors.hairline,
+  },
+  messageRole: {
+    color: colors.primary,
+    fontFamily: 'Inter_500Medium',
+    fontSize: 9,
+    letterSpacing: 1.2,
+    marginBottom: 7,
+  },
+  messageRoleUser: {
+    color: colors.primary,
+  },
+  messageText: {
+    color: colors.whiteSoft,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  messageTextUser: {
+    color: colors.foreground,
+  },
+  messageTime: {
+    color: colors.mutedForeground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 9,
+    marginTop: 8,
+  },
+  composer: {
+    minHeight: 52,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+    backgroundColor: colors.glassStrong,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 15,
+    paddingRight: 6,
+    marginTop: 17,
+  },
+  composerInput: {
+    flex: 1,
+    minHeight: 45,
+    maxHeight: 90,
+    color: colors.foreground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 13,
+    paddingVertical: 12,
+  },
+  sendButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 14,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendButtonDisabled: {
+    opacity: 0.28,
+  },
+  conversationFootnote: {
+    color: colors.mutedForeground,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 9,
+    letterSpacing: 0.3,
+    textAlign: 'center',
+    marginTop: 10,
   },
   utilityView: {
     flex: 1,
