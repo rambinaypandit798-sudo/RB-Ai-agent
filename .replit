@@ -20,4 +20,13 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [nix]
-packages = ["flutter"]
+packages = ["flutter", "android-tools"]
+
+[[ports]]
+localPort = 5037
+externalPort = 80
+exposeLocalhost = true
+
+[[ports]]
+localPort = 24158
+externalPort = 8080
