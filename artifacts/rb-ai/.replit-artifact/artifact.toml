@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/"
+title = "RB.ai"
+description = "A premium futuristic AI assistant mobile app with a cinematic deep-space command center, voice orb, model switching, quick actions, and glassmorphic navigation."
+version = "1.0.0"
+id = "artifacts/rb-ai"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/" ]
+localPort = 24158
+
+[services.development]
+run = "pnpm --filter @workspace/rb-ai run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/rb-ai", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/rb-ai", "run", "serve" ]
+
+[services.env]
+PORT = "24158"
+BASE_PATH = "/"
